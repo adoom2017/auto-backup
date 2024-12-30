@@ -23,3 +23,15 @@ go.work.sum
 
 # env file
 .env
+
+# sqlitedb
+*.db
+
+# config
+config.yaml
+
+# vs code
+.vscode
+
+# log
+logs/
