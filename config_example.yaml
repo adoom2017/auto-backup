@@ -5,10 +5,13 @@ onedrive:
   scope: "files.readwrite offline_access"
 log:
   path: "the_path_of_your_log"
-  base_name: "backup"
-  max_days: 7
+  max_size: 10
+  max_backups: 3
+  level: "info"
+  compress: true
 backup:
   root_dir: "the_root_dir_of_your_backup"
   output_dir: "the_output_dir_of_your_backup"
   password: "your_password"
   force_full_backup: false
+  cron: "0 0 * * *"

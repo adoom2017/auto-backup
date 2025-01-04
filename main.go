@@ -1,81 +1,147 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"auto-backup/config"
-	"auto-backup/process"
-	"auto-backup/restful"
-	"auto-backup/utils/db"
-	"auto-backup/utils/logger"
+	"auto-backup/db"
+	"auto-backup/handler"
+	"auto-backup/log"
+	"auto-backup/model"
+	"auto-backup/service"
+	"auto-backup/uploader"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// 使用导入的logger
-var log *logger.Logger
+func GetAuthUrl(config *config.Config) string {
+	return fmt.Sprintf("https://login.live.com/oauth20_authorize.srf?client_id=%s&scope=%s&response_type=code&redirect_uri=%s",
+		config.OneDrive.ClientID,
+		config.OneDrive.Scope,
+		config.OneDrive.RedirectURI)
+}
 
 func main() {
 	// 加载配置文件
-	err := config.LoadConfig("./config.yaml")
+	config, err := config.LoadConfig("./config.yaml")
 	if err != nil {
 		fmt.Printf("加载配置失败: %v\n", err)
 		return
 	}
 
 	// 初始化日志
-	logger.InitLogger(
-		config.GlobalConfig.Log.BaseName,
-		config.GlobalConfig.Log.Level,
-		config.GlobalConfig.Log.MaxDays,
-	)
-	log = logger.GetLogger() // 获取全局日志记录器
+	log.SetLogConfig(log.LogConfig{
+		Level:      log.LogLevel(config.Log.Level),
+		Filename:   config.Log.Path,
+		MaxSize:    config.Log.MaxSize,
+		MaxBackups: config.Log.MaxBackups,
+		Compress:   config.Log.Compress,
+	})
 
 	// 初始化数据库
 	db.InitDB()
 	defer db.CloseDB()
 
+	action := make(chan model.TokenAction)
+	ctx, cancel := context.WithCancel(context.Background())
+
 	// 启动http服务
-	server := restful.NewOneDriveServer(8080)
-	server.Start()
-	defer server.Stop()
+	server := handler.NewAuthHandlerServer(8080, action)
+	server.Start(ctx)
+	defer cancel()
 
-	// 加载认证信息
-	firstTime := false
-	for {
-		authInfo, err := db.LoadAuthInfo()
-		if err != nil {
-			if !firstTime {
-				log.Error("加载认证信息失败: %v\n", err)
-				log.Info("请先进行认证, 将下面的URL复制到浏览器中进行认证:")
-				log.Info("%s", server.GetAuthUrl())
-				firstTime = true
-			}
-
-			// 等待5秒后重试
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		config.GlobalAuthInfo = authInfo
-		break
+	onedriveConfig := &uploader.OneDriveConfig{
+		ClientID:     config.OneDrive.ClientID,
+		ClientSecret: config.OneDrive.ClientSecret,
+		Scope:        config.OneDrive.Scope,
+		RedirectURI:  config.OneDrive.RedirectURI,
 	}
 
-	log.Info("认证信息加载成功, %v", config.GlobalAuthInfo)
-
-	rootDir := config.GlobalConfig.Backup.RootDir                 // 要备份的根目录
-	outputDir := config.GlobalConfig.Backup.OutputDir             // 备份文件的输出目录
-	password := config.GlobalConfig.Backup.Password               // 压缩密码
-	forceFullBackup := config.GlobalConfig.Backup.ForceFullBackup // 是否强制全量备份
-
-	err = process.IncrementalCompress(rootDir, outputDir, password, forceFullBackup)
+	uploader, err := uploader.NewOneDriveUploader(onedriveConfig)
 	if err != nil {
-		log.Error("备份错误: %v", err)
+		log.Error("初始化OneDrive上传器失败: %v", err)
 		return
 	}
 
-	log.Info("备份完成")
+	done := make(chan bool)
+
+	go func() {
+		for {
+			select {
+			case act := <-action:
+				if act.Action == "getToken" {
+					err = uploader.GetAccessTokenByCode(act.Code)
+					if err != nil {
+						log.Error("获取访问令牌失败: %v", err)
+						continue
+					}
+					log.Info("认证成功, 可以进行备份")
+					done <- true
+				} else if act.Action == "refreshToken" {
+					err = uploader.RefreshAccessToken()
+					if err != nil {
+						log.Error("刷新访问令牌失败: %v", err)
+						continue
+					}
+					log.Info("刷新令牌成功, 可以进行备份")
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// 加载认证信息
+	authInfo, err := db.LoadAuthInfo()
+	if err != nil {
+		log.Error("加载认证信息失败: %v\n", err)
+		log.Info("请先进行认证, 将下面的URL复制到浏览器中进行认证:")
+		log.Info("%s", GetAuthUrl(config))
+
+		<-done
+	}
+
+	// 判断认证信息是否过期
+	if authInfo.ExpiresIn < time.Now().Unix() {
+		log.Info("认证信息已过期, 请重新认证")
+		log.Info("请先进行认证, 将下面的URL复制到浏览器中进行认证:")
+		log.Info("%s", GetAuthUrl(config))
+
+		<-done
+	}
+
+	// 启动定时刷新Token
+	go func() {
+		for {
+			time.Sleep(time.Duration(30 * time.Minute))
+			uploader.RefreshAccessToken()
+		}
+	}()
+
+	backupInfo := service.BackupInfo{
+		SrcDir:    config.Backup.RootDir,
+		OutputDir: config.Backup.OutputDir,
+		Password:  config.Backup.Password,
+		ForceFull: config.Backup.ForceFullBackup,
+		Cron:      config.Backup.Cron,
+		Uploader:  uploader,
+	}
+
+	backupInfo.StartScheduledBackup()
+
+	// 启动时执行一次备份
+	backupInfo.Backup()
+
+	// 等待退出信号
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Info("收到退出信号,程序退出")
 
 	// 还原示例
 	// err = process.RestoreBackup("./backups", "./restored", "123456")
@@ -84,7 +150,4 @@ func main() {
 	// 	return
 	// }
 	// fmt.Printf("还原完成\n")
-
-	// 等待信号
-	server.WaitForSignal()
 }

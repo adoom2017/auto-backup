@@ -1,7 +1,9 @@
 package uploader
 
 import (
-	"auto-backup/config"
+	"auto-backup/db"
+	"auto-backup/log"
+	"auto-backup/model"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -25,6 +27,10 @@ const ( // 替换为你要上传的文件路径
 
 // OneDriveConfig OneDrive配置
 type OneDriveConfig struct {
+	ClientID     string
+	ClientSecret string
+	RedirectURI  string
+	Scope        string
 	AccessToken  string
 	RefreshToken string
 	ExpireTime   time.Time
@@ -33,12 +39,6 @@ type OneDriveConfig struct {
 
 type UploadSession struct {
 	UploadURL string `json:"uploadUrl"`
-}
-
-type TokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresIn    int    `json:"expires_in"`
 }
 
 // OneDriveUploader OneDrive上传实现
@@ -58,26 +58,19 @@ func NewOneDriveUploader(config *OneDriveConfig) (*OneDriveUploader, error) {
 	}, nil
 }
 
-// GetAuthUrl 获取授权URL
-func (u *OneDriveUploader) GetAuthUrl() string {
-	return fmt.Sprintf("https://login.live.com/oauth20_authorize.srf?client_id=%s&scope=%s&response_type=code&redirect_uri=%s",
-		config.GlobalConfig.OneDrive.ClientID,
-		config.GlobalConfig.OneDrive.Scope,
-		config.GlobalConfig.OneDrive.RedirectURI)
-}
-
 func (u *OneDriveUploader) GetAccessTokenByCode(code string) error {
 	// 构建请求参数
 	formData := url.Values{
-		"client_id":     {config.GlobalConfig.OneDrive.ClientID},
-		"redirect_uri":  {config.GlobalConfig.OneDrive.RedirectURI},
-		"client_secret": {config.GlobalConfig.OneDrive.ClientSecret},
+		"client_id":     {u.config.ClientID},
+		"redirect_uri":  {u.config.RedirectURI},
+		"client_secret": {u.config.ClientSecret},
 		"code":          {code},
 		"grant_type":    {"authorization_code"},
 	}
 
 	req, err := http.NewRequest("POST", tokenURL, bytes.NewBufferString(formData.Encode()))
 	if err != nil {
+		log.Error("创建请求失败: %v", err)
 		return err
 	}
 
@@ -85,6 +78,7 @@ func (u *OneDriveUploader) GetAccessTokenByCode(code string) error {
 
 	resp, err := u.client.Do(req)
 	if err != nil {
+		log.Error("发送请求失败: %v", err)
 		return err
 	}
 
@@ -93,12 +87,14 @@ func (u *OneDriveUploader) GetAccessTokenByCode(code string) error {
 	// 读取响应内容
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		log.Error("读取响应内容失败: %v", err)
 		return err
 	}
 
 	// 解析响应JSON
-	var tokenResp TokenResponse
+	var tokenResp model.TokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		log.Error("解析响应JSON失败: %v", err)
 		return err
 	}
 
@@ -106,64 +102,72 @@ func (u *OneDriveUploader) GetAccessTokenByCode(code string) error {
 	u.config.RefreshToken = tokenResp.RefreshToken
 	u.config.ExpireTime = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 
+	// 保存认证信息
+	db.SaveAuthInfo(&db.AuthInfo{
+		AccessToken:  u.config.AccessToken,
+		RefreshToken: u.config.RefreshToken,
+		ExpiresIn:    u.config.ExpireTime.Unix(),
+		UserID:       tokenResp.UserID,
+	})
+
 	return nil
 }
 
 // RefreshByRefreshToken 使用refreshToken刷新accessToken
 func (u *OneDriveUploader) RefreshAccessToken() error {
 
-	// 如果accessToken不为空且未过期，则直接返回
-	if u.config.AccessToken != "" && time.Now().Before(u.config.ExpireTime.Add(-5*time.Minute)) {
-		return nil
+	formData := url.Values{
+		"client_id":     {u.config.ClientID},
+		"redirect_uri":  {u.config.RedirectURI},
+		"client_secret": {u.config.ClientSecret},
+		"refresh_token": {u.config.RefreshToken},
+		"grant_type":    {"refresh_token"},
 	}
 
-	// 如果refreshToken不为空，则使用refreshToken获取accessToken
-	if u.config.RefreshToken != "" {
-		formData := url.Values{
-			"client_id":     {config.GlobalConfig.OneDrive.ClientID},
-			"redirect_uri":  {config.GlobalConfig.OneDrive.RedirectURI},
-			"client_secret": {config.GlobalConfig.OneDrive.ClientSecret},
-			"refresh_token": {u.config.RefreshToken},
-			"grant_type":    {"refresh_token"},
-		}
-
-		req, err := http.NewRequest("POST", tokenURL, bytes.NewBufferString(formData.Encode()))
-		if err != nil {
-			return err
-		}
-
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-		resp, err := u.client.Do(req)
-		if err != nil {
-			return err
-		}
-
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("获取accessToken失败，状态码: %d", resp.StatusCode)
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return err
-		}
-
-		var tokenResponse TokenResponse
-		if err := json.Unmarshal(body, &tokenResponse); err != nil {
-			return err
-		}
-
-		u.config.AccessToken = tokenResponse.AccessToken
-		u.config.RefreshToken = tokenResponse.RefreshToken
-		u.config.ExpireTime = time.Now().Add(time.Duration(tokenResponse.ExpiresIn) * time.Second)
-
-		return nil
-	} else {
-		// 用户手动认证
-
+	req, err := http.NewRequest("POST", tokenURL, bytes.NewBufferString(formData.Encode()))
+	if err != nil {
+		log.Error("创建请求失败: %v", err)
+		return err
 	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := u.client.Do(req)
+	if err != nil {
+		log.Error("发送请求失败: %v", err)
+		return err
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Error("获取accessToken失败，状态码: %d", resp.StatusCode)
+		return fmt.Errorf("获取accessToken失败，状态码: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Error("读取响应内容失败: %v", err)
+		return err
+	}
+
+	var tokenResponse model.TokenResponse
+	if err := json.Unmarshal(body, &tokenResponse); err != nil {
+		log.Error("解析响应JSON失败: %v", err)
+		return err
+	}
+
+	u.config.AccessToken = tokenResponse.AccessToken
+	u.config.RefreshToken = tokenResponse.RefreshToken
+	u.config.ExpireTime = time.Now().Add(time.Duration(tokenResponse.ExpiresIn) * time.Second)
+
+	// 保存认证信息
+	db.SaveAuthInfo(&db.AuthInfo{
+		AccessToken:  u.config.AccessToken,
+		RefreshToken: u.config.RefreshToken,
+		ExpiresIn:    u.config.ExpireTime.Unix(),
+		UserID:       tokenResponse.UserID,
+	})
 
 	return nil
 }
@@ -179,6 +183,7 @@ func (u *OneDriveUploader) createUploadSession(uploadURL string) (*UploadSession
 	payloadBytes, _ := json.Marshal(payload)
 	req, err := http.NewRequest("POST", uploadURL, bytes.NewReader(payloadBytes))
 	if err != nil {
+		log.Error("创建请求失败: %v", err)
 		return nil, err
 	}
 
@@ -187,18 +192,21 @@ func (u *OneDriveUploader) createUploadSession(uploadURL string) (*UploadSession
 
 	resp, err := u.client.Do(req)
 	if err != nil {
+		log.Error("发送请求失败: %v", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		log.Error("创建上传会话失败: %s", string(body))
 		return nil, fmt.Errorf("failed to create upload session: %s", string(body))
 	}
 
 	var session UploadSession
 	err = json.NewDecoder(resp.Body).Decode(&session)
 	if err != nil {
+		log.Error("解析响应JSON失败: %v", err)
 		return nil, err
 	}
 
@@ -209,12 +217,14 @@ func (u *OneDriveUploader) createUploadSession(uploadURL string) (*UploadSession
 func (u *OneDriveUploader) uploadFileChunks(session *UploadSession, localFilePath string) error {
 	file, err := os.Open(localFilePath)
 	if err != nil {
+		log.Error("无法打开文件: %v", err)
 		return fmt.Errorf("无法打开文件: %w", err)
 	}
 	defer file.Close()
 
 	fileInfo, err := file.Stat()
 	if err != nil {
+		log.Error("无法获取文件信息: %v", err)
 		return fmt.Errorf("无法获取文件信息: %w", err)
 	}
 	fileSize := fileInfo.Size()
@@ -236,11 +246,13 @@ func (u *OneDriveUploader) uploadFileChunks(session *UploadSession, localFilePat
 			chunk := make([]byte, end-start+1)
 			_, err := file.ReadAt(chunk, start)
 			if err != nil && err != io.EOF {
+				log.Error("读取文件块失败: %v", err)
 				return fmt.Errorf("读取文件块失败: %w", err)
 			}
 
 			req, err := http.NewRequest("PUT", session.UploadURL, bytes.NewReader(chunk))
 			if err != nil {
+				log.Error("创建请求失败: %v", err)
 				return fmt.Errorf("创建请求失败: %w", err)
 			}
 
@@ -255,6 +267,7 @@ func (u *OneDriveUploader) uploadFileChunks(session *UploadSession, localFilePat
 					time.Sleep(retryDelay)
 					continue
 				}
+				log.Error("上传块失败: %v", err)
 				return fmt.Errorf("上传块失败: %w", err)
 			}
 
@@ -263,7 +276,7 @@ func (u *OneDriveUploader) uploadFileChunks(session *UploadSession, localFilePat
 
 			// 处理响应
 			if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
-				fmt.Printf("文件上传完成: %d/%d 字节\n", end+1, fileSize)
+				log.Info("文件上传完成: %d/%d 字节", end+1, fileSize)
 				return nil
 			} else if resp.StatusCode == http.StatusAccepted {
 				var serverResponse map[string]interface{}
@@ -277,7 +290,7 @@ func (u *OneDriveUploader) uploadFileChunks(session *UploadSession, localFilePat
 					newStart, _ := strconv.ParseInt(rangeParts[0], 10, 64)
 					if newStart > start {
 						start = newStart
-						fmt.Printf("上传进度: %.2f%%\n", float64(start)/float64(fileSize)*100)
+						log.Info("上传进度: %.2f%%", float64(start)/float64(fileSize)*100)
 						break // 成功上传当前块，继续下一块
 					}
 				}
@@ -287,6 +300,7 @@ func (u *OneDriveUploader) uploadFileChunks(session *UploadSession, localFilePat
 					time.Sleep(retryDelay)
 					continue
 				}
+				log.Error("上传块失败，状态码: %d，响应: %s", resp.StatusCode, string(body))
 				return fmt.Errorf("上传块失败，状态码: %d，响应: %s", resp.StatusCode, string(body))
 			}
 		}
@@ -301,21 +315,31 @@ func (u *OneDriveUploader) uploadFileChunks(session *UploadSession, localFilePat
 
 func (u *OneDriveUploader) UploadBigFile(folderPath, localFilePath string) error {
 
+	log.Info("开始上传文件: %s", localFilePath)
+
 	// 从文件路径中获取文件名
 	fileName := filepath.Base(localFilePath)
 	uploadURL := fmt.Sprintf(uploadURLTemplate, folderPath, fileName)
 
+	log.Info("上传URL: %s", uploadURL)
+
 	// Step 1: 获取上传会话
 	uploadSession, err := u.createUploadSession(uploadURL)
 	if err != nil {
+		log.Error("创建上传会话失败: %v", err)
 		return err
 	}
+
+	log.Info("上传会话: %v", uploadSession)
 
 	// Step 2: 分块上传文件
 	err = u.uploadFileChunks(uploadSession, localFilePath)
 	if err != nil {
+		log.Error("分块上传文件失败: %v", err)
 		return err
 	}
+
+	log.Info("文件上传完成")
 
 	return nil
 }

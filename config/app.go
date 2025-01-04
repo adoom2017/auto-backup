@@ -1,34 +1,12 @@
 package config
 
 import (
-	"auto-backup/utils/logger"
+	"auto-backup/log"
 	"fmt"
 	"os"
 
 	"gopkg.in/yaml.v3"
 )
-
-var (
-	GlobalConfig = &Config{}
-)
-
-func init() {
-	// 设置默认值
-	GlobalConfig = &Config{
-		OneDrive: OneDrive{
-			ClientID:     "",
-			ClientSecret: "",
-			RedirectURI:  "http://localhost:8080/token",
-			Scope:        "files.readwrite offline_access",
-		},
-		Log: Log{
-			Path:     "./logs",
-			Level:    logger.LogDebug,
-			BaseName: "app",
-			MaxDays:  7,
-		},
-	}
-}
 
 // 完整的配置结构
 type OneDrive struct {
@@ -39,10 +17,11 @@ type OneDrive struct {
 }
 
 type Log struct {
-	Path     string `yaml:"path"`
-	BaseName string `yaml:"base_name"`
-	Level    int    `yaml:"level"`
-	MaxDays  int    `yaml:"max_days"`
+	Path       string       `yaml:"path"`
+	Level      log.LogLevel `yaml:"level"`
+	MaxSize    int          `yaml:"max_size"`
+	MaxBackups int          `yaml:"max_backups"`
+	Compress   bool         `yaml:"compress"`
 }
 
 type Backup struct {
@@ -50,6 +29,7 @@ type Backup struct {
 	OutputDir       string `yaml:"output_dir"`
 	Password        string `yaml:"password"`
 	ForceFullBackup bool   `yaml:"force_full_backup"`
+	Cron            string `yaml:"cron"`
 }
 
 type Config struct {
@@ -59,18 +39,19 @@ type Config struct {
 }
 
 // 加载完整配置
-func LoadConfig(path string) error {
+func LoadConfig(path string) (*Config, error) {
 	yamlFile, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Printf("加载配置文件失败: %v\n", err)
-		return err
+		return nil, err
 	}
 
-	err = yaml.Unmarshal(yamlFile, GlobalConfig)
+	config := &Config{}
+	err = yaml.Unmarshal(yamlFile, config)
 	if err != nil {
 		fmt.Printf("解析配置文件失败: %v\n", err)
-		return err
+		return nil, err
 	}
 
-	return nil
+	return config, nil
 }
