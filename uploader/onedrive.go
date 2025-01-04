@@ -34,7 +34,6 @@ type OneDriveConfig struct {
 	AccessToken  string
 	RefreshToken string
 	ExpireTime   time.Time
-	BasePath     string
 }
 
 type UploadSession struct {
@@ -110,6 +109,8 @@ func (u *OneDriveUploader) GetAccessTokenByCode(code string) error {
 		UserID:       tokenResp.UserID,
 	})
 
+	log.Info("认证成功: code: %s, 过期时间: %s", code, u.config.ExpireTime.Format(time.RFC3339))
+
 	return nil
 }
 
@@ -168,6 +169,8 @@ func (u *OneDriveUploader) RefreshAccessToken() error {
 		ExpiresIn:    u.config.ExpireTime.Unix(),
 		UserID:       tokenResponse.UserID,
 	})
+
+	log.Info("刷新accessToken成功，过期时间: %s", u.config.ExpireTime.Format(time.RFC3339))
 
 	return nil
 }

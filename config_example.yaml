@@ -1,17 +1,17 @@
 onedrive:
-  client_id: "your_client_id"
-  client_secret: "your_client_secret"
-  redirect_uri: "http://auth.callback.local:8080/token"
-  scope: "files.readwrite offline_access"
+  client_id: "your_client_id"                   # 你的client_id
+  client_secret: "your_client_secret"           # 你的client_secret
+  redirect_uri: "http://localhost:8080/token"   # 你的redirect_uri
+  scope: "files.readwrite offline_access"       # scope固定值不用管
 log:
-  path: "./logs/auto-backup.log"
-  max_size: 10
-  max_backups: 3
-  level: "info"
-  compress: true
+  path: "./logs/auto-backup.log"               # 日志文件路径
+  max_size: 10                                 # 日志文件最大大小
+  max_backups: 3                               # 日志文件最大备份数
+  level: "info"                                # 日志级别
+  compress: true                               # 是否压缩日志
 backup:
-  root_dir: "/root/backup"
-  output_dir: "/root/output"
-  password: "your_password"
-  force_full_backup: false
-  cron: "0 0 * * *"
+  root_dir: "/root/backup"                     # 备份源目录
+  output_dir: "/root/output"                   # 备份输出目录 
+  password: "your_password"                    # 备份密码
+  force_full_backup: false                     # 是否强制全量备份
+  cron: "0 0 * * *"                            # 备份时间
