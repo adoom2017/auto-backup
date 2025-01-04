@@ -10,12 +10,22 @@ type AuthInfo struct {
 // 保存认证信息到数据库
 func SaveAuthInfo(a *AuthInfo) error {
 
+	// 删除旧的认证信息
+	DeleteAuthInfo()
+
 	query := `INSERT INTO auth_info (access_token, refresh_token, expires_in, user_id) 
 			  VALUES ($1, $2, $3, $4)
 			  ON CONFLICT (user_id) DO UPDATE 
 			  SET access_token = $1, refresh_token = $2, expires_in = $3`
 
 	_, err := db.Exec(query, a.AccessToken, a.RefreshToken, a.ExpiresIn, a.UserID)
+	return err
+}
+
+// 删除认证信息
+func DeleteAuthInfo() error {
+	query := `DELETE FROM auth_info`
+	_, err := db.Exec(query)
 	return err
 }
 
