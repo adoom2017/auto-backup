@@ -28,7 +28,7 @@ func GetAuthUrl(config *config.Config) string {
 
 func main() {
 	// 加载配置文件
-	config, err := config.LoadConfig("./config/config.yaml")
+	config, err := config.LoadConfig("./config.yaml")
 	if err != nil {
 		fmt.Printf("加载配置失败: %v\n", err)
 		return

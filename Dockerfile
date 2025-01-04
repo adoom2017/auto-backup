@@ -4,6 +4,9 @@ FROM golang:1.22-alpine AS builder
 # 设置工作目录
 WORKDIR /app
 
+# 安装构建必需的包
+RUN apk add --no-cache gcc musl-dev
+
 # 复制go.mod和go.sum文件
 COPY go.mod go.sum ./
 
@@ -14,7 +17,7 @@ RUN go mod download
 COPY . .
 
 # 构建应用
-RUN CGO_ENABLED=0 GOOS=linux go build -o auto-backup .
+RUN CGO_ENABLED=1 GOOS=linux go build -o auto-backup .
 
 # 使用alpine作为运行环境
 FROM alpine:latest
@@ -31,7 +34,7 @@ COPY --from=builder /app/auto-backup .
 RUN mkdir -p logs backups config
 
 # 复制配置文件
-COPY config_example.yaml ./config/config.yaml
+COPY config_example.yaml ./config.yaml
 
 # 暴露端口
 EXPOSE 8080
