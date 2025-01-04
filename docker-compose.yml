@@ -1,0 +1,16 @@
+services:
+  backup-service:
+    image: adoom2018/auto-backup:v1.0
+    volumes:
+      - ./backup_data:/root/backup    # 备份源目录
+      - ./output:/root/output          # 备份输出目录
+      - ./config:/root/config          # 配置文件
+    ports:
+      - "8080:8080"                  # 映射认证回调端口
+    environment:
+      - TZ=Asia/Shanghai             # 设置时区
+      - CLIENT_ID=your_client_id     # 添加 CLIENT_ID 环境变量
+      - CLIENT_SECRET=your_client_secret # 添加 CLIENT_SECRET 环境变量
+      - REDIRECT_URI=your_redirect_uri # 添加 REDIRECT_URI 环境变量
+      - BACKUP_PASSWORD=your_password # 添加 BACKUP_PASSWORD 环境变量
+    restart: unless-stopped 

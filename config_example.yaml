@@ -4,14 +4,14 @@ onedrive:
   redirect_uri: "your_redirect_uri"
   scope: "files.readwrite offline_access"
 log:
-  path: "the_path_of_your_log"
+  path: "./logs/auto-backup.log"
   max_size: 10
   max_backups: 3
   level: "info"
   compress: true
 backup:
-  root_dir: "the_root_dir_of_your_backup"
-  output_dir: "the_output_dir_of_your_backup"
+  root_dir: "/root/backup"
+  output_dir: "/root/output"
   password: "your_password"
   force_full_backup: false
   cron: "0 0 * * *"

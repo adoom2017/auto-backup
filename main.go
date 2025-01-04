@@ -28,10 +28,24 @@ func GetAuthUrl(config *config.Config) string {
 
 func main() {
 	// 加载配置文件
-	config, err := config.LoadConfig("./config.yaml")
+	config, err := config.LoadConfig("./config/config.yaml")
 	if err != nil {
 		fmt.Printf("加载配置失败: %v\n", err)
 		return
+	}
+
+	// 配置信息中client_id和client_secret从环境变量中获取，如果没有设置，则使用配置文件中的值
+	if os.Getenv("CLIENT_ID") != "" {
+		config.OneDrive.ClientID = os.Getenv("CLIENT_ID")
+	}
+	if os.Getenv("CLIENT_SECRET") != "" {
+		config.OneDrive.ClientSecret = os.Getenv("CLIENT_SECRET")
+	}
+	if os.Getenv("REDIRECT_URI") != "" {
+		config.OneDrive.RedirectURI = os.Getenv("REDIRECT_URI")
+	}
+	if os.Getenv("BACKUP_PASSWORD") != "" {
+		config.Backup.Password = os.Getenv("BACKUP_PASSWORD")
 	}
 
 	// 初始化日志
