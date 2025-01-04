@@ -118,6 +118,8 @@ func main() {
 		log.Info("%s", GetAuthUrl(config))
 
 		<-done
+
+		authInfo, _ = db.LoadAuthInfo()
 	}
 
 	// 判断认证信息是否过期
