@@ -31,7 +31,7 @@ WORKDIR /root/
 COPY --from=builder /app/auto-backup .
 
 # 创建必要的目录
-RUN mkdir -p logs backups config
+RUN mkdir -p logs backup config
 
 # 复制配置文件
 COPY config_example.yaml ./config.yaml
