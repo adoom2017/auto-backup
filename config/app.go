@@ -14,6 +14,7 @@ type OneDrive struct {
 	ClientSecret string `yaml:"client_secret"`
 	Scope        string `yaml:"scope"`
 	RedirectURI  string `yaml:"redirect_uri"`
+	BasePath     string `yaml:"base_path"`
 }
 
 type Log struct {

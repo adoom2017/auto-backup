@@ -3,6 +3,7 @@ onedrive:
   client_secret: "your_client_secret"           # 你的client_secret
   redirect_uri: "http://localhost:8080/token"   # 你的redirect_uri
   scope: "files.readwrite offline_access"       # scope固定值不用管
+  base_path: "backup"                           # 备份文件夹名称
 log:
   path: "./logs/auto-backup.log"               # 日志文件路径
   max_size: 10                                 # 日志文件最大大小

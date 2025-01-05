@@ -32,6 +32,7 @@ type BackupInfo struct {
 	Password  string
 	Cron      string
 	ForceFull bool
+	BasePath  string
 	Uploader  uploader.Uploader
 }
 
@@ -345,7 +346,7 @@ func (b *BackupInfo) Backup() error {
 		log.Info("开始上传文件: %s", destZip)
 
 		// 上传文件
-		err = b.Uploader.UploadBigFile("backup", destZip)
+		err = b.Uploader.UploadBigFile(b.BasePath, destZip)
 		if err != nil {
 			return fmt.Errorf("上传文件失败: %v", err)
 		}

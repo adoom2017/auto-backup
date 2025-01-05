@@ -46,6 +46,11 @@ func initConfig() (*config.Config, bool, error) {
 	if os.Getenv("BACKUP_PASSWORD") != "" {
 		cfg.Backup.Password = os.Getenv("BACKUP_PASSWORD")
 	}
+	if os.Getenv("REMOTE_PATH") != "" {
+		cfg.OneDrive.BasePath = os.Getenv("REMOTE_PATH")
+	} else {
+		cfg.OneDrive.BasePath = "backup"
+	}
 
 	return cfg, needUpload, nil
 }
@@ -105,6 +110,7 @@ func main() {
 		Password:  config.Backup.Password,
 		ForceFull: config.Backup.ForceFullBackup,
 		Cron:      config.Backup.Cron,
+		BasePath:  config.OneDrive.BasePath,
 		Uploader:  store,
 	}
 
