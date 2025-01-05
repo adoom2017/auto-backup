@@ -131,6 +131,8 @@ func main() {
 		<-done
 	}
 
+	uploader.SetAuthInfo(authInfo)
+
 	// 启动定时刷新Token
 	go func() {
 		for {

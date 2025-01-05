@@ -57,6 +57,13 @@ func NewOneDriveUploader(config *OneDriveConfig) (*OneDriveUploader, error) {
 	}, nil
 }
 
+// 设置认证信息
+func (u *OneDriveUploader) SetAuthInfo(authInfo *db.AuthInfo) {
+	u.config.AccessToken = authInfo.AccessToken
+	u.config.RefreshToken = authInfo.RefreshToken
+	u.config.ExpireTime = time.Unix(authInfo.ExpiresIn, 0)
+}
+
 func (u *OneDriveUploader) GetAccessTokenByCode(code string) error {
 	// 构建请求参数
 	formData := url.Values{

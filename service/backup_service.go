@@ -13,6 +13,7 @@ import (
 	"auto-backup/db"
 	"auto-backup/log"
 	"auto-backup/uploader"
+	"auto-backup/utils"
 )
 
 // 存储文件信息的结构
@@ -38,6 +39,23 @@ func getFilesList(srcDir string) (map[string]FileInfo, error) {
 	err := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
+		}
+
+		// 过滤隐藏文件和系统文件
+		filename := info.Name()
+		if filename[0] == '.' { // 隐藏文件
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// 检查是否在排除列表中
+		if utils.ExcludedFiles[filename] {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
 		relPath, err := filepath.Rel(srcDir, path)
