@@ -1,10 +1,13 @@
 package service
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/alexmullins/zip"
@@ -30,6 +33,19 @@ type BackupInfo struct {
 	Cron      string
 	ForceFull bool
 	Uploader  uploader.Uploader
+}
+
+// 添加缓冲区大小常量
+const (
+	defaultBufferSize = 4 * 1024 * 1024 // 4MB 缓冲区
+)
+
+// 包级别的缓冲池
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, defaultBufferSize)
+		return &b
+	},
 }
 
 // 获取目录下所有文件的信息
@@ -140,7 +156,7 @@ func updateFileRecords(files map[string]FileInfo, backupID string) error {
 	// 批量插入新记录
 	const batchSize = 1000
 	records := make([]*db.FileRecord, 0, len(files))
-	
+
 	for _, info := range files {
 		records = append(records, &db.FileRecord{
 			Path:     info.Path,
@@ -155,13 +171,13 @@ func updateFileRecords(files map[string]FileInfo, backupID string) error {
 		if end > len(records) {
 			end = len(records)
 		}
-		
+
 		err = db.BatchSaveFileRecords(records[i:end])
 		if err != nil {
 			log.Error("批量插入记录失败: %v", err)
 			return err
 		}
-		
+
 		log.Info("成功插入 %d 条记录", end-i)
 	}
 
@@ -170,52 +186,83 @@ func updateFileRecords(files map[string]FileInfo, backupID string) error {
 	return tx.Commit()
 }
 
+// 根据文件类型选择最佳压缩方式
+func selectCompressionMethod(filename string) uint16 {
+	ext := strings.ToLower(filepath.Ext(filename))
+
+	// 已压缩的文件类型使用 STORE 方法（不压缩）
+	noCompressionExts := map[string]bool{
+		".jpg": true, ".jpeg": true, ".png": true,
+		".mp3": true, ".mp4": true, ".zip": true,
+		".rar": true, ".7z": true, ".gz": true,
+	}
+
+	if noCompressionExts[ext] {
+		return zip.Store
+	}
+
+	// 其他文件使用 DEFLATE 方法
+	return zip.Deflate
+}
+
 // 将文件压缩逻辑抽取为独立函数
-func compressFile(archive *zip.Writer, srcDir, filePath, password string) error {
+func (b *BackupInfo) compressFile(archive *zip.Writer, srcDir, filePath, password string) error {
 	fullPath := filepath.Join(srcDir, filePath)
 	info, err := os.Stat(fullPath)
 	if err != nil {
 		log.Error("获取文件信息失败: %v", err)
-		return err
+		return fmt.Errorf("获取文件信息失败: %v", err)
 	}
 
 	if info.IsDir() {
 		return nil
 	}
 
+	// 创建带缓冲的读取器
+	file, err := os.Open(fullPath)
+	if err != nil {
+		log.Error("打开文件失败: %v", err)
+		return fmt.Errorf("打开文件失败: %v", err)
+	}
+	defer file.Close()
+
+	bufferedReader := bufio.NewReaderSize(file, defaultBufferSize)
+
 	header, err := zip.FileInfoHeader(info)
 	if err != nil {
-		log.Error("获取文件头失败: %v", err)
-		return err
+		log.Error("创建文件头失败: %v", err)
+		return fmt.Errorf("创建文件头失败: %v", err)
 	}
 
 	relPath, err := filepath.Rel(srcDir, fullPath)
 	if err != nil {
 		log.Error("获取相对路径失败: %v", err)
-		return err
+		return fmt.Errorf("获取相对路径失败: %v", err)
 	}
+
 	header.Name = filepath.ToSlash(relPath)
 	header.SetModTime(info.ModTime())
-	header.Method = zip.Deflate
+
+	// 根据文件类型选择压缩方法
+	header.Method = selectCompressionMethod(filePath)
 	header.SetPassword(password)
 
 	writer, err := archive.CreateHeader(header)
 	if err != nil {
 		log.Error("创建文件头失败: %v", err)
-		return err
+		return fmt.Errorf("创建文件头失败: %v", err)
 	}
 
-	file, err := os.Open(fullPath)
-	if err != nil {
-		log.Error("打开文件失败: %v", err)
-		return err
-	}
-	defer file.Close()
+	// 从池中获取缓冲区
+	buf := *(bufPool.Get().(*[]byte))
+	defer func() {
+		bufPool.Put(&buf)
+	}()
 
-	_, err = io.Copy(writer, file)
+	_, err = io.CopyBuffer(writer, bufferedReader, buf)
 	if err != nil {
-		log.Error("添加压缩文件失败: %v", err)
-		return err
+		log.Error("复制文件内容失败: %v", err)
+		return fmt.Errorf("复制文件内容失败: %v", err)
 	}
 
 	return nil
@@ -274,7 +321,7 @@ func (b *BackupInfo) Backup() error {
 
 	// 改为单线程顺序处理文件
 	for filePath := range filesToUpdate {
-		err := compressFile(archive, b.SrcDir, filePath, b.Password)
+		err := b.compressFile(archive, b.SrcDir, filePath, b.Password)
 		if err != nil {
 			log.Error("压缩文件失败: %v", err)
 			return fmt.Errorf("压缩文件失败: %v", err)
