@@ -341,15 +341,17 @@ func (b *BackupInfo) Backup() error {
 		return fmt.Errorf("更新文件记录失败: %v", err)
 	}
 
-	log.Info("开始上传文件: %s", destZip)
+	if b.Uploader != nil {
+		log.Info("开始上传文件: %s", destZip)
 
-	// 上传文件
-	err = b.Uploader.UploadBigFile("backup", destZip)
-	if err != nil {
-		return fmt.Errorf("上传文件失败: %v", err)
+		// 上传文件
+		err = b.Uploader.UploadBigFile("backup", destZip)
+		if err != nil {
+			return fmt.Errorf("上传文件失败: %v", err)
+		}
+
+		log.Info("上传文件完成")
 	}
-
-	log.Info("上传文件完成")
 
 	return nil
 }

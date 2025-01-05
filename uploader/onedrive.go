@@ -5,6 +5,7 @@ import (
 	"auto-backup/log"
 	"auto-backup/model"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -44,17 +45,114 @@ type UploadSession struct {
 type OneDriveUploader struct {
 	config *OneDriveConfig
 	client *http.Client
+	action chan model.TokenAction // 用于用于toke操作通知
+	done   chan bool              //用于通知主进程完成认证，可以继续
+	ctx    context.Context
 }
 
-func NewOneDriveUploader(config *OneDriveConfig) (*OneDriveUploader, error) {
+func NewOneDriveUploader(config *OneDriveConfig, action chan model.TokenAction, done chan bool, ctx context.Context) (*OneDriveUploader, error) {
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 	}
 
-	return &OneDriveUploader{
+	onedriveUploader := &OneDriveUploader{
 		config: config,
 		client: client,
-	}, nil
+		action: action,
+		done:   done,
+		ctx:    ctx,
+	}
+
+	onedriveUploader.startTokenHandler()
+
+	onedriveUploader.startTokenRefreshTimer()
+
+	return onedriveUploader, nil
+}
+
+func (u *OneDriveUploader) GetAuthUrl() string {
+	return fmt.Sprintf("https://login.live.com/oauth20_authorize.srf?client_id=%s&scope=%s&response_type=code&redirect_uri=%s",
+		u.config.ClientID,
+		u.config.Scope,
+		u.config.RedirectURI)
+}
+
+func (u *OneDriveUploader) DoAuthInit() {
+	// 加载认证信息
+	authInfo, err := db.LoadAuthInfo()
+	needAuth := false
+
+	if err != nil {
+		log.Error("加载认证信息失败: %v\n", err)
+		needAuth = true
+	} else if authInfo.ExpiresIn < time.Now().Unix() {
+		log.Info("认证信息已过期, 请重新认证")
+		needAuth = true
+	}
+
+	if needAuth {
+		log.Info("请先进行认证, 将下面的URL复制到浏览器中进行认证:")
+		fmt.Println(u.GetAuthUrl())
+		<-u.done
+		// 重新加载认证信息
+		if authInfo, err = db.LoadAuthInfo(); err != nil {
+			log.Error("重新加载认证信息失败: %v", err)
+			return
+		}
+	}
+
+	u.SetAuthInfo(authInfo)
+}
+
+// 启动定时器刷新token
+func (u *OneDriveUploader) startTokenRefreshTimer() {
+	ticker := time.NewTicker(time.Duration(30 * time.Minute))
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				err := u.RefreshAccessToken()
+				if err != nil {
+					log.Error("刷新令牌失败: %v", err)
+					continue
+				}
+				log.Info("刷新令牌成功, 可以进行备份")
+			case <-u.ctx.Done():
+				log.Info("token refresh退出")
+				return
+			}
+		}
+	}()
+}
+
+// 启动一个goroutine，用于处理token操作
+func (u *OneDriveUploader) startTokenHandler() {
+	go func() {
+		for {
+			select {
+			case act := <-u.action:
+				if act.Action == "getToken" {
+					err := u.GetAccessTokenByCode(act.Code)
+					if err != nil {
+						log.Error("获取访问令牌失败: %v", err)
+						continue
+					}
+					log.Info("认证成功, 可以进行备份")
+					u.done <- true
+				} else if act.Action == "refreshToken" {
+					err := u.RefreshAccessToken()
+					if err != nil {
+						log.Error("刷新访问令牌失败: %v", err)
+						continue
+					}
+					log.Info("刷新令牌成功, 可以进行备份")
+				}
+			case <-u.ctx.Done():
+				log.Info("token handler退出")
+				return
+			}
+		}
+	}()
 }
 
 // 设置认证信息
