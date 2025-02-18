@@ -38,7 +38,8 @@ type BackupInfo struct {
 
 // 添加缓冲区大小常量
 const (
-	defaultBufferSize = 4 * 1024 * 1024 // 4MB 缓冲区
+	defaultBufferSize = 4 * 1024 * 1024        // 4MB 缓冲区
+	maxZipSize        = 1 * 1024 * 1024 * 1024 // 1GB 每个压缩包最大大小
 )
 
 // 包级别的缓冲池
@@ -307,25 +308,103 @@ func (b *BackupInfo) Backup() error {
 	}
 
 	timestamp := time.Now().Format("20060102_150405")
-	destZip := filepath.Join(b.OutputDir, fmt.Sprintf("%s_%s.zip", backupID, timestamp))
 
-	// 创建新的zip文件
-	zipfile, err := os.Create(destZip)
-	if err != nil {
-		log.Error("创建zip文件失败: %v", err)
-		return fmt.Errorf("创建zip文件失败: %v", err)
+	// 用于跟踪当前压缩文件的大小
+	var currentZipSize int64 = 0
+	var zipIndex = 1
+	var currentArchive *zip.Writer
+	var currentZipFile *os.File
+
+	// 创建新的zip文件函数
+	createNewZipFile := func() error {
+		if currentZipFile != nil {
+			currentArchive.Close()
+			currentZipFile.Close()
+		}
+
+		destZip := filepath.Join(b.OutputDir, fmt.Sprintf("%s_%s_part%d.zip", backupID, timestamp, zipIndex))
+		zipfile, err := os.Create(destZip)
+		if err != nil {
+			log.Error("创建zip文件失败: %v", err)
+			return fmt.Errorf("创建zip文件失败: %v", err)
+		}
+		currentZipFile = zipfile
+		currentArchive = zip.NewWriter(zipfile)
+		currentZipSize = 0
+		zipIndex++
+		return nil
 	}
-	defer zipfile.Close()
 
-	archive := zip.NewWriter(zipfile)
-	defer archive.Close()
+	// 创建第一个zip文件
+	if err := createNewZipFile(); err != nil {
+		return err
+	}
+	defer func() {
+		if currentArchive != nil {
+			currentArchive.Close()
+		}
+		if currentZipFile != nil {
+			currentZipFile.Close()
+		}
+	}()
 
-	// 改为单线程顺序处理文件
+	// 修改文件压缩逻辑
 	for filePath := range filesToUpdate {
-		err := b.compressFile(archive, b.SrcDir, filePath, b.Password)
+		fullPath := filepath.Join(b.SrcDir, filePath)
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			log.Error("获取文件信息失败: %v", err)
+			continue
+		}
+
+		// 如果当前文件加上当前zip大小超过限制，创建新的zip文件
+		if !info.IsDir() && currentZipSize+info.Size() > maxZipSize {
+			if err := createNewZipFile(); err != nil {
+				return err
+			}
+
+			// 如果有上传器，上传前一个文件
+			if b.Uploader != nil {
+				prevZipPath := filepath.Join(b.OutputDir, fmt.Sprintf("%s_%s_part%d.zip", backupID, timestamp, zipIndex-2))
+				log.Info("开始上传文件: %s", prevZipPath)
+				err = b.Uploader.UploadBigFile(b.BasePath, prevZipPath)
+				if err != nil {
+					return fmt.Errorf("上传文件失败: %v", err)
+				}
+				// 上传成功后删除本地文件
+				os.Remove(prevZipPath)
+			}
+		}
+
+		// 压缩文件
+		err = b.compressFile(currentArchive, b.SrcDir, filePath, b.Password)
 		if err != nil {
 			log.Error("压缩文件失败: %v", err)
 			return fmt.Errorf("压缩文件失败: %v", err)
+		}
+
+		if !info.IsDir() {
+			currentZipSize += info.Size()
+		}
+	}
+
+	// 关闭最后一个压缩文件
+	currentArchive.Close()
+	currentZipFile.Close()
+
+	// 上传最后的文件
+	if b.Uploader != nil {
+		for i := 1; i < zipIndex; i++ {
+			lastZipPath := filepath.Join(b.OutputDir, fmt.Sprintf("%s_%s_part%d.zip", backupID, timestamp, i))
+			if _, err := os.Stat(lastZipPath); err == nil {
+				log.Info("开始上传文件: %s", lastZipPath)
+				err = b.Uploader.UploadBigFile(b.BasePath, lastZipPath)
+				if err != nil {
+					return fmt.Errorf("上传文件失败: %v", err)
+				}
+				// 上传成功后删除本地文件
+				os.Remove(lastZipPath)
+			}
 		}
 	}
 
@@ -340,18 +419,6 @@ func (b *BackupInfo) Backup() error {
 	err = updateFileRecords(currentFiles, backupID)
 	if err != nil {
 		return fmt.Errorf("更新文件记录失败: %v", err)
-	}
-
-	if b.Uploader != nil {
-		log.Info("开始上传文件: %s", destZip)
-
-		// 上传文件
-		err = b.Uploader.UploadBigFile(b.BasePath, destZip)
-		if err != nil {
-			return fmt.Errorf("上传文件失败: %v", err)
-		}
-
-		log.Info("上传文件完成")
 	}
 
 	return nil

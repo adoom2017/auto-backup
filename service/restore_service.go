@@ -7,115 +7,180 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/alexmullins/zip"
 )
 
 type RestoreInfo struct {
-	BackupDir string
-	TargetDir string
-	Password  string
+	ZipDir    string // 压缩文件所在目录
+	OutputDir string // 解压目标目录
+	Password  string // 解压密码
+	BackupID  string // 备份ID
+	Timestamp string // 可选，指定要还原的备份时间
 }
 
-// 还原备份文件到指定目录
+// 备份分片信息
+type BackupPart struct {
+	Path      string    // 文件路径
+	Timestamp time.Time // 备份时间
+	PartNum   int       // 分片序号
+}
+
 func (r *RestoreInfo) Restore() error {
-	// 确保目标目录存在
-	if err := os.MkdirAll(r.TargetDir, 0755); err != nil {
-		log.Error("创建还原目录失败: %v", err)
-		return fmt.Errorf("创建还原目录失败: %v", err)
-	}
-
-	// 获取所有备份文件
-	files, err := os.ReadDir(r.BackupDir)
+	// 1. 查找所有分片文件并解析信息
+	pattern := fmt.Sprintf("%s_*.zip", r.BackupID)
+	matches, err := filepath.Glob(filepath.Join(r.ZipDir, pattern))
 	if err != nil {
-		log.Error("读取备份目录失败: %v", err)
-		return fmt.Errorf("读取备份目录失败: %v", err)
+		return fmt.Errorf("查找分片文件失败: %v", err)
 	}
 
-	// 过滤并排序zip文件
-	var backupFiles []string
-	for _, f := range files {
-		if filepath.Ext(f.Name()) == ".zip" {
-			backupFiles = append(backupFiles, f.Name())
+	if len(matches) == 0 {
+		return fmt.Errorf("未找到备份文件: %s", pattern)
+	}
+
+	// 2. 解析所有备份文件信息
+	backupFiles := make(map[string][]BackupPart) // key: timestamp
+	for _, path := range matches {
+		timestamp, partNum, err := parseBackupFileName(path)
+		if err != nil {
+			log.Warn("跳过无效的备份文件: %s, 错误: %v", path, err)
+			continue
+		}
+
+		timeStr := timestamp.Format("20060102_150405")
+		backupFiles[timeStr] = append(backupFiles[timeStr], BackupPart{
+			Path:      path,
+			Timestamp: timestamp,
+			PartNum:   partNum,
+		})
+	}
+
+	// 3. 如果没有指定时间，列出所有可用的备份时间
+	if r.Timestamp == "" {
+		timestamps := make([]string, 0, len(backupFiles))
+		for ts := range backupFiles {
+			timestamps = append(timestamps, ts)
+		}
+		sort.Sort(sort.Reverse(sort.StringSlice(timestamps))) // 最新的在前面
+
+		log.Info("可用的备份时间:")
+		for _, ts := range timestamps {
+			log.Info("- %s (共%d个分片)", ts, len(backupFiles[ts]))
+		}
+		return fmt.Errorf("请指定要还原的备份时间")
+	}
+
+	// 4. 获取指定时间的备份文件
+	parts, exists := backupFiles[r.Timestamp]
+	if !exists {
+		return fmt.Errorf("未找到指定时间(%s)的备份文件", r.Timestamp)
+	}
+
+	// 5. 按分片序号排序
+	sort.Slice(parts, func(i, j int) bool {
+		return parts[i].PartNum < parts[j].PartNum
+	})
+
+	// 6. 确保输出目录存在
+	if err := os.MkdirAll(r.OutputDir, 0755); err != nil {
+		return fmt.Errorf("创建输出目录失败: %v", err)
+	}
+
+	// 7. 依次解压每个分片
+	for i, part := range parts {
+		log.Info("正在解压第%d/%d个分片: %s", i+1, len(parts), filepath.Base(part.Path))
+		if err := r.extractZipFile(part.Path); err != nil {
+			return fmt.Errorf("解压文件 %s 失败: %v", part.Path, err)
 		}
 	}
-	// 按时间戳排序（最早的在前）
-	sort.Strings(backupFiles)
 
-	// 按顺序解压每个备份文件
-	for _, backupFile := range backupFiles {
-		backupPath := filepath.Join(r.BackupDir, backupFile)
-		file, err := os.Open(backupPath)
-		if err != nil {
-			log.Error("打开备份文件失败: %v", err)
-			return fmt.Errorf("打开备份文件失败: %v", err)
-		}
-		defer file.Close()
+	log.Info("还原完成")
+	return nil
+}
 
-		fileInfo, err := file.Stat()
-		if err != nil {
-			log.Error("获取文件信息失败: %v", err)
-			return fmt.Errorf("获取文件信息失败: %v", err)
-		}
+// 解析备份文件名
+// 文件名格式: backupID_20060102_150405_partN.zip
+func parseBackupFileName(filename string) (time.Time, int, error) {
+	base := filepath.Base(filename)
+	parts := strings.Split(base, "_")
+	if len(parts) != 4 {
+		return time.Time{}, 0, fmt.Errorf("无效的文件名格式")
+	}
 
-		reader, err := zip.NewReader(file, fileInfo.Size())
-		if err != nil {
-			log.Error("打开备份文件 %s 失败: %v", backupFile, err)
-			return fmt.Errorf("打开备份文件 %s 失败: %v", backupFile, err)
-		}
+	// 解析时间戳
+	timeStr := parts[1] + "_" + strings.TrimSuffix(parts[2], "_part")
+	timestamp, err := time.ParseInLocation("20060102_150405", timeStr, time.Local)
+	if err != nil {
+		return time.Time{}, 0, fmt.Errorf("无效的时间格式: %v", err)
+	}
 
-		for _, file := range reader.File {
-			// 设置密码
+	// 解析分片序号
+	var partNum int
+	_, err = fmt.Sscanf(parts[3], "part%d.zip", &partNum)
+	if err != nil {
+		return time.Time{}, 0, fmt.Errorf("无效的分片序号: %v", err)
+	}
+
+	return timestamp, partNum, nil
+}
+
+func (r *RestoreInfo) extractZipFile(zipPath string) error {
+	reader, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return fmt.Errorf("打开zip文件失败: %v", err)
+	}
+	defer reader.Close()
+
+	// 遍历压缩文件中的每个文件
+	for _, file := range reader.File {
+		if file.IsEncrypted() {
 			file.SetPassword(r.Password)
-
-			// 解密文件
-			rc, err := file.Open()
-			if err != nil {
-				log.Error("解密文件 %s 失败: %v", file.Name, err)
-				return fmt.Errorf("解密文件 %s 失败: %v", file.Name, err)
-			}
-			defer rc.Close()
-
-			// 构建目标路径
-			targetPath := filepath.Join(r.TargetDir, file.Name)
-
-			if file.FileInfo().IsDir() {
-				// 创建目录
-				if err := os.MkdirAll(targetPath, file.Mode()); err != nil {
-					log.Error("创建目录 %s 失败: %v", targetPath, err)
-					return fmt.Errorf("创建目录 %s 失败: %v", targetPath, err)
-				}
-				continue
-			}
-
-			// 确保父目录存在
-			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-				log.Error("创建父目录 %s 失败: %v", filepath.Dir(targetPath), err)
-				return fmt.Errorf("创建父目录 %s 失败: %v", filepath.Dir(targetPath), err)
-			}
-
-			// 创建目标文件
-			f, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, file.Mode())
-			if err != nil {
-				log.Error("创建文件 %s 失败: %v", targetPath, err)
-				return fmt.Errorf("创建文件 %s 失败: %v", targetPath, err)
-			}
-
-			// 复制内容
-			_, err = io.Copy(f, rc)
-			f.Close()
-			if err != nil {
-				log.Error("写入文件 %s 失败: %v", targetPath, err)
-				return fmt.Errorf("写入文件 %s 失败: %v", targetPath, err)
-			}
-
-			// 设置修改时间
-			if err := os.Chtimes(targetPath, file.ModTime(), file.ModTime()); err != nil {
-				log.Error("设置文件时间 %s 失败: %v", targetPath, err)
-				return fmt.Errorf("设置文件时间 %s 失败: %v", targetPath, err)
-			}
 		}
-		fmt.Printf("已还原备份文件: %s\n", backupFile)
+
+		// 构建完整的输出路径
+		outPath := filepath.Join(r.OutputDir, file.Name)
+
+		if file.FileInfo().IsDir() {
+			// 创建目录
+			if err := os.MkdirAll(outPath, file.Mode()); err != nil {
+				return fmt.Errorf("创建目录失败: %v", err)
+			}
+			continue
+		}
+
+		// 确保父目录存在
+		if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+			return fmt.Errorf("创建父目录失败: %v", err)
+		}
+
+		// 创建输出文件
+		outFile, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, file.Mode())
+		if err != nil {
+			return fmt.Errorf("创建输出文件失败: %v", err)
+		}
+
+		// 打开压缩文件
+		rc, err := file.Open()
+		if err != nil {
+			outFile.Close()
+			return fmt.Errorf("打开压缩文件失败: %v", err)
+		}
+
+		// 复制文件内容
+		_, err = io.Copy(outFile, rc)
+		rc.Close()
+		outFile.Close()
+
+		if err != nil {
+			return fmt.Errorf("解压文件内容失败: %v", err)
+		}
+
+		// 保持文件修改时间
+		if err := os.Chtimes(outPath, file.ModTime(), file.ModTime()); err != nil {
+			log.Warn("设置文件时间失败: %v", err)
+		}
 	}
 
 	return nil
