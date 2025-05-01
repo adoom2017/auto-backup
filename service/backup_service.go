@@ -50,6 +50,12 @@ var bufPool = sync.Pool{
 	},
 }
 
+// 添加一个变量和互斥锁来跟踪备份状态
+var (
+	isRunning bool
+	mu        sync.Mutex
+)
+
 // 获取目录下所有文件的信息
 func getFilesList(srcDir string) (map[string]FileInfo, error) {
 	files := make(map[string]FileInfo)
@@ -272,6 +278,23 @@ func (b *BackupInfo) compressFile(archive *zip.Writer, srcDir, filePath, passwor
 
 // 增量压缩文件夹
 func (b *BackupInfo) Backup() error {
+	// 检查是否已经在运行
+	mu.Lock()
+	if isRunning {
+		mu.Unlock()
+		log.Warn("备份任务已经在运行中，不能重复运行")
+		return fmt.Errorf("备份任务已经在运行中")
+	}
+	isRunning = true
+	mu.Unlock()
+
+	// 确保在函数结束时重置运行状态
+	defer func() {
+		mu.Lock()
+		isRunning = false
+		mu.Unlock()
+	}()
+
 	// 添加输入参数验证
 	if b.SrcDir == "" || b.OutputDir == "" {
 		log.Error("源目录和输出目录不能为空")
