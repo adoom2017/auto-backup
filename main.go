@@ -52,6 +52,10 @@ func initConfig() (*config.Config, bool, error) {
 		cfg.OneDrive.BasePath = "backup"
 	}
 
+	if os.Getenv("FORCE_FULL_BACKUP") != "" {
+		cfg.Backup.ForceFullBackup = os.Getenv("FORCE_FULL_BACKUP") == "true"
+	}
+
 	return cfg, needUpload, nil
 }
 

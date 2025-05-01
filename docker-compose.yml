@@ -13,4 +13,5 @@ services:
       - CLIENT_SECRET=your_client_secret # 添加 CLIENT_SECRET 环境变量
       - REDIRECT_URI=your_redirect_uri # 添加 REDIRECT_URI 环境变量
       - BACKUP_PASSWORD=your_password # 添加 BACKUP_PASSWORD 环境变量
+      - FORCE_FULL_BACKUP=false # 是否强制全量备份
     restart: unless-stopped 
