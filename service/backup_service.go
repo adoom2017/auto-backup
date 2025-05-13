@@ -24,6 +24,7 @@ type FileInfo struct {
 	Path    string
 	ModTime time.Time
 	IsDir   bool
+	Hash    string
 }
 
 type BackupInfo struct {
@@ -91,18 +92,37 @@ func getFilesList(srcDir string) (map[string]FileInfo, error) {
 			return nil
 		}
 
-		files[relPath] = FileInfo{
-			Path:    relPath,
-			ModTime: info.ModTime(),
-			IsDir:   info.IsDir(),
+		if !info.IsDir() {
+			// 计算文件哈希（仅对文件进行）
+			hash, err := utils.QuickFileHash(path) // 使用快速哈希算法
+			if err != nil {
+				log.Warn("计算文件哈希失败: %s, %v", path, err)
+				// 失败时使用空哈希，继续处理
+				hash = ""
+			}
+
+			files[relPath] = FileInfo{
+				Path:    relPath,
+				ModTime: info.ModTime(),
+				IsDir:   info.IsDir(),
+				Hash:    hash,
+			}
+		} else {
+			files[relPath] = FileInfo{
+				Path:    relPath,
+				ModTime: info.ModTime(),
+				IsDir:   info.IsDir(),
+				Hash:    "", // 目录没有哈希值
+			}
 		}
+
 		return nil
 	})
 
 	return files, err
 }
 
-// 检查文件是否需要更新
+// 检查文件是否需要更新（需要修改db.FileRecord结构添加Hash字段）
 func needsBackup(srcPath string, backupID string, forceFullBackup bool) (map[string]bool, error) {
 	needsUpdate := make(map[string]bool)
 
@@ -128,17 +148,39 @@ func needsBackup(srcPath string, backupID string, forceFullBackup bool) (map[str
 		return nil, err
 	}
 
-	lastBackup := make(map[string]time.Time)
+	lastBackup := make(map[string]*db.FileRecord)
 	for _, record := range records {
-		lastBackup[record.Path] = record.ModTime
+		lastBackup[record.Path] = record
 	}
 
 	// 比较文件
 	for path, info := range currentFiles {
-		if lastModTime, exists := lastBackup[path]; !exists || info.ModTime.After(lastModTime) {
+		lastRecord, exists := lastBackup[path]
+
+		if !exists {
+			// 文件是新增的
+			log.Debug("新增文件: %s", path)
 			needsUpdate[path] = true
+		} else if info.ModTime.After(lastRecord.ModTime) {
+			// 时间变化了，检查哈希值
+			if info.Hash != "" && lastRecord.Hash != "" && info.Hash != lastRecord.Hash {
+				// 哈希值不同，内容确实变化了
+				log.Debug("文件内容已变更: %s", path)
+				needsUpdate[path] = true
+			} else if info.ModTime.Sub(lastRecord.ModTime).Seconds() > 1 {
+				// 如果哈希值为空，但修改时间差大于1秒，认为文件变更
+				log.Debug("文件时间已变更: %s", path)
+				needsUpdate[path] = true
+			}
 		}
 	}
+
+	// 可选：处理已删除的文件（如果需要）
+	// for path := range lastBackup {
+	// 	if _, exists := currentFiles[path]; !exists {
+	// 		log.Info("文件已删除: %s", path)
+	// 	}
+	// }
 
 	return needsUpdate, nil
 }
@@ -169,6 +211,7 @@ func updateFileRecords(files map[string]FileInfo, backupID string) error {
 		records = append(records, &db.FileRecord{
 			Path:     info.Path,
 			ModTime:  info.ModTime,
+			Hash:     info.Hash,
 			BackupID: backupID,
 		})
 	}
@@ -180,7 +223,7 @@ func updateFileRecords(files map[string]FileInfo, backupID string) error {
 			end = len(records)
 		}
 
-		err = db.BatchSaveFileRecords(records[i:end])
+		err = db.BatchSaveFileRecordsOptimized(records[i:end])
 		if err != nil {
 			log.Error("批量插入记录失败: %v", err)
 			return err
