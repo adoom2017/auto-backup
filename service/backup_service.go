@@ -45,7 +45,7 @@ const (
 
 // 包级别的缓冲池
 var bufPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		b := make([]byte, defaultBufferSize)
 		return &b
 	},
@@ -104,14 +104,14 @@ func getFilesList(srcDir string) (map[string]FileInfo, error) {
 			files[relPath] = FileInfo{
 				Path:    relPath,
 				ModTime: info.ModTime(),
-				IsDir:   info.IsDir(),
+				IsDir:   false,
 				Hash:    hash,
 			}
 		} else {
 			files[relPath] = FileInfo{
 				Path:    relPath,
 				ModTime: info.ModTime(),
-				IsDir:   info.IsDir(),
+				IsDir:   true,
 				Hash:    "", // 目录没有哈希值
 			}
 		}
@@ -123,15 +123,8 @@ func getFilesList(srcDir string) (map[string]FileInfo, error) {
 }
 
 // 检查文件是否需要更新（需要修改db.FileRecord结构添加Hash字段）
-func needsBackup(srcPath string, backupID string, forceFullBackup bool) (map[string]bool, error) {
+func needsBackup(currentFiles map[string]FileInfo, backupID string, forceFullBackup bool) (map[string]bool, error) {
 	needsUpdate := make(map[string]bool)
-
-	// 获取当前目录下的所有文件
-	currentFiles, err := getFilesList(srcPath)
-	if err != nil {
-		log.Error("获取文件列表失败: %v", err)
-		return nil, err
-	}
 
 	// 如果是强制全量备份，直接返回所有文件
 	if forceFullBackup {
@@ -161,26 +154,12 @@ func needsBackup(srcPath string, backupID string, forceFullBackup bool) (map[str
 			// 文件是新增的
 			log.Debug("新增文件: %s", path)
 			needsUpdate[path] = true
-		} else if info.ModTime.After(lastRecord.ModTime) {
-			// 时间变化了，检查哈希值
-			if info.Hash != "" && lastRecord.Hash != "" && info.Hash != lastRecord.Hash {
-				// 哈希值不同，内容确实变化了
-				log.Debug("文件内容已变更: %s", path)
-				needsUpdate[path] = true
-			} else if info.ModTime.Sub(lastRecord.ModTime).Seconds() > 1 {
-				// 如果哈希值为空，但修改时间差大于1秒，认为文件变更
-				log.Debug("文件时间已变更: %s", path)
-				needsUpdate[path] = true
-			}
+		} else if info.Hash != "" && lastRecord.Hash != "" && info.Hash != lastRecord.Hash {
+			// 哈希值不同，内容确实变化了
+			log.Debug("文件内容已变更: %s", path)
+			needsUpdate[path] = true
 		}
 	}
-
-	// 可选：处理已删除的文件（如果需要）
-	// for path := range lastBackup {
-	// 	if _, exists := currentFiles[path]; !exists {
-	// 		log.Info("文件已删除: %s", path)
-	// 	}
-	// }
 
 	return needsUpdate, nil
 }
@@ -350,11 +329,17 @@ func (b *BackupInfo) Backup() error {
 		}
 	}()
 
-	// 检查需要更新的文件
 	backupID := filepath.Base(b.SrcDir)
 
-	// 检查需要更新的文件
-	filesToUpdate, err := needsBackup(b.SrcDir, backupID, b.ForceFull)
+	// 只获取一次文件列表，后面复用这个结果
+	currentFiles, err := getFilesList(b.SrcDir)
+	if err != nil {
+		log.Error("获取文件列表失败: %v", err)
+		return err
+	}
+
+	// 检查需要更新的文件，复用已获取的文件列表
+	filesToUpdate, err := needsBackup(currentFiles, backupID, b.ForceFull)
 	if err != nil {
 		log.Error("检查需要更新的文件失败: %v", err)
 		return err
@@ -476,12 +461,7 @@ func (b *BackupInfo) Backup() error {
 
 	log.Info("压缩文件完成")
 
-	// 备份完成后，更新数据库记录
-	currentFiles, err := getFilesList(b.SrcDir)
-	if err != nil {
-		return fmt.Errorf("获取文件列表失败: %v", err)
-	}
-
+	// 备份完成后，直接使用已有的文件列表更新数据库记录
 	err = updateFileRecords(currentFiles, backupID)
 	if err != nil {
 		return fmt.Errorf("更新文件记录失败: %v", err)
